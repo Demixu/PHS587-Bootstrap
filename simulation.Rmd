@@ -1,0 +1,187 @@
+---
+title: "simulation"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(MASS)
+```
+
+
+##construct shared function
+
+```{r}
+##regression coefficient
+ols_regress = function(X,Y){
+  X= as.matrix(X)
+  Y= as.matrix(Y)
+  beta = ginv(t(X)%*%X)%*%t(X)%*%Y
+}
+
+##calculate 95% confidence interval
+conf_interval = function(vec){
+  return(quantile(vec,c(0.025,0.975)))
+}
+```
+
+## non-parametric bootstrap
+
+
+```{r}
+non_para_boot = function(X,B,Y,intercept=TRUE) {
+  row_num = nrow(X)
+  X = as.matrix(X)
+  if(intercept){
+    X = cbind(rep(1,row_num),X)
+  }
+X = as.matrix(X)
+coef_index = matrix(0,B,ncol(X))
+row = seq(from=1, to=row_num, by=1)
+ for (i in 1:B) {
+  set.seed(i+1)
+  row_index = sample(row,row_num,replace = TRUE)
+  X_input =X[row_index,]
+  Y_input = Y[row_index]
+  beta =ols_regress(X_input,Y_input)
+  coef_index[i,]=as.vector(beta)
+ }
+return(coef_index)
+}
+
+#non_output = non_para_boot(X_mat,1000,Y,intercept = TRUE)
+#apply(non_output,2,conf_interval)
+##95%confidence interval
+#confint(lm(Y~X_mat))
+```
+
+
+##parametric bootstrap
+```{r}
+para_boot = function(X,B,Y,intercept=TRUE) {
+  row_num = nrow(X)
+  X = as.matrix(X)
+  if(intercept){
+    X = cbind(rep(1,row_num),X)
+  }
+X = as.matrix(X)
+beta = ols_regress(X,Y)
+pred=X%*%beta
+res = Y - pred
+sigma_hat = sum(res^2)/(row_num-ncol(X))
+error = rnorm(row_num,mean=0,sd=sqrt(sigma_hat))
+Y_star = pred +error
+coef_index = matrix(0,B,ncol(X))
+row = seq(from=1, to=row_num, by=1)
+ for (i in 1:B) {
+  set.seed(i+1)
+  row_index = sample(row,row_num,replace = TRUE)
+  X_input =X[row_index,]
+  Y_input = Y_star[row_index]
+  beta =ols_regress(X_input,Y_input)
+  coef_index[i,]=as.vector(beta)
+ }
+return(coef_index)
+}
+
+
+
+```
+
+## Simulate data
+
+Here, I consider two factor, one is the sample size of the training dataset, another is the total number of bootstrap. For conveience, I focus on one coefficeint to compare the confidence interval length and point estimate.
+
+**Bootstrap time**: 200, 500, 1000
+**Dataset size**: 10, 40, 100, 200
+
+```{r}
+set.seed(111)
+Sigma <- diag(c(8,3,3,2),4,4)
+Sigma[1,2]=3
+Sigma[2,1]=3#X1 and x2 are correlated 
+X =MASS::mvrnorm(n=200, c(2, 2,2,3), Sigma)%>%as.data.frame()
+colnames(X)=c("X1","X2","X3","X4")
+X1 =X[,1]
+X2 =X[,2]
+X3 =X[,3]
+X4= X[,4]
+#generate Y
+eps = rnorm(200,mean=0,sd=1)
+Y_mat = 2+0.5*X1+eps
+X_mat = as.matrix(X)
+##true estimate
+beta = ginv(t(X_mat)%*%X_mat)%*%t(X_mat)%*%Y_mat
+```
+
+```{r}
+boot=c(200,500,1000)
+data_size = c(10,50,100,200)
+beta = NULL
+
+for (i in 1:4){
+  size = data_size[i]
+  Y = Y_mat[c(1:as.numeric(size))]
+  X = X_mat[c(1:as.numeric(size)),]
+for (j in 1:3){
+  B = boot[j]
+  non_output = non_para_boot(X,B,Y,intercept = TRUE)%>%apply(.,2,conf_interval)%>%t()
+  para_output = para_boot(X,B,Y,intercept = TRUE)%>%apply(.,2,conf_interval)%>%t()
+  non_beta = as.matrix(non_output[2,])%>%t()
+  non_beta = cbind(non_beta,method=0,boot_time=B,sample_size=size)
+  para_beta = as.matrix(para_output[2,])%>%t()
+  para_beta = cbind(para_beta,method=1,boot_time=B,sample_size=size)
+  beta = rbind(beta,non_beta,para_beta)
+}
+  ols_beta=as.matrix(confint(lm(Y~X))[2,])%>%t()
+  ols_beta = cbind(ols_beta,method=2,boot_time=0,sample_size=size)
+  beta = rbind(beta,ols_beta)
+}
+beta = beta%>%as.data.frame()
+colnames(beta)[c(1,2)]=c("lower","upper")
+beta = beta%>%mutate(estimate= (lower+upper)/2)%>%mutate(interval_width=round(upper-lower,3))%>%mutate(method=if_else(method==0,"non-parametric",if_else(method==1,"parametric","ols")))%>%mutate(sample_size=factor(sample_size,levels=c(10,40,100,200)))
+beta
+
+```
+
+We can see that when effect size is small(0.5) here, parametric method will have overall more precise estimate(closer to the ols estimate). But when the bootstrap time increase, the difference between parametric and non-parametric method will be narrower.
+
+
+```{r}
+##visualize the distribution
+beta_filter = beta%>%filter(method!="ols")
+
+A =beta%>%ggplot(aes(x = method, y = estimate,color=as.factor(boot_time),alpha=0.5))+
+            geom_point()+
+            geom_errorbar(aes(ymin = lower, ymax= upper,color=as.factor(boot_time)))+facet_grid(~sample_size)+ theme(axis.text.x = element_text(angle = 75, hjust = 1))
+print(A)
+```
+
+
+```{r}
+beta2=NULL
+for (i in 1:3){
+  size = data_size[i]
+  Y = Y_mat[c(1:as.numeric(size))]
+  X = X_mat[c(1:as.numeric(size)),]
+for (j in 1:3){
+  B = boot[j]
+  non_output = non_para_boot(X,B,Y,intercept = TRUE)
+  para_output = para_boot(X,B,Y,intercept = TRUE)
+  non_beta = as.matrix(non_output[,2])
+  non_beta = cbind(non_beta,method=0,boot_time=B,sample_size=size)
+  para_beta = as.matrix(para_output[,2])
+  para_beta = cbind(para_beta,method=1,boot_time=B,sample_size=size)
+  beta2 = rbind(beta2,non_beta,para_beta)
+}
+}
+```
+
+```{r}
+beta2 = beta2%>%as.data.frame()
+colnames(beta)[1]=c("estimate")
+beta2 = beta2%>%mutate(sample_size=factor(sample_size,levels=c(10,40,100,200)))%>%mutate(method=if_else(method==0,"parametric","non-parametric"))
+beta
+```
+
